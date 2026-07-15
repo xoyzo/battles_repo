@@ -1,10 +1,10 @@
 """Discord UI views.
 
-- `ChallengeView`: public Accept/Decline prompt used for a direct 1v1
-  `/battle start opponent:@User mode:Duel`-style challenge.
-- `LobbyView`: Join/Leave/Start prompt used for Free For All / Team Battle
-  (and any custom mode with more than two players), so players opt in
-  rather than being drafted by command parameters.
+- `LobbyView`: shown while a battle is in `LOBBY` status. Deck-building
+  happens entirely through `/battle add` / `/battle remove` (real
+  autocomplete via `BallInstanceTransform`, no view chained inside a
+  button callback); this view just shows the roster and offers Begin /
+  Cancel.
 - `BattleView`: the per-turn action-selection view. A *new* `BattleView`
   instance is created for every turn (with `timeout=turn_timer_seconds`),
   attached to the same public battle message, so the countdown naturally
@@ -24,126 +24,41 @@ from typing import Awaitable, Callable, TYPE_CHECKING
 import discord
 
 from .actions import ACTIONS, ActionKey
-from .buttons import (
-    AbilitySelect, ActionButton, ConfirmButton, DeclineButton,
-    JoinButton, LeaveButton, ModeSelect, StartButton,
-    SurrenderButton, TargetSelect,
-)
+from .buttons import AbilitySelect, ActionButton, BeginButton, CancelLobbyButton, SurrenderButton, TargetSelect
 
 if TYPE_CHECKING:
-    from battles.models import Battle, BattleMode
+    from battles.models import Battle
 
 log = logging.getLogger("battles.views")
 
 TurnCompleteCallback = Callable[["BattleView"], Awaitable[None]]
 
 
-class ChallengeView(discord.ui.View):
-    """Accept/Decline prompt for a direct two-player challenge."""
+class LobbyView(discord.ui.View):
+    """Begin/Cancel prompt for a battle waiting on players to `/battle add`."""
 
     def __init__(
         self,
         *,
-        challenger_id: int,
-        opponent_id: int,
-        on_accept: Callable[[discord.Interaction], Awaitable[None]],
-        on_decline: Callable[[discord.Interaction], Awaitable[None]],
-        timeout: float = 60.0,
+        on_begin: Callable[[discord.Interaction], Awaitable[None]],
+        on_cancel: Callable[[discord.Interaction], Awaitable[None]],
+        timeout: float = 600.0,
     ):
         super().__init__(timeout=timeout)
-        self.challenger_id = challenger_id
-        self.opponent_id = opponent_id
-        self._on_accept = on_accept
-        self._on_decline = on_decline
-        self.add_item(ConfirmButton(label="Accept Battle"))
-        self.add_item(DeclineButton(label="Decline"))
+        self._on_begin = on_begin
+        self._on_cancel = on_cancel
+        self.add_item(BeginButton())
+        self.add_item(CancelLobbyButton())
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.opponent_id:
-            await interaction.response.send_message("This challenge isn't for you.", ephemeral=True)
-            return False
-        return True
+    async def handle_begin(self, interaction: discord.Interaction) -> None:
+        await self._on_begin(interaction)
 
-    async def handle_confirm(self, interaction: discord.Interaction) -> None:
-        for item in self.children:
-            item.disabled = True  # type: ignore[attr-defined]
-        await self._on_accept(interaction)
-        self.stop()
-
-    async def handle_decline(self, interaction: discord.Interaction) -> None:
-        for item in self.children:
-            item.disabled = True  # type: ignore[attr-defined]
-        await self._on_decline(interaction)
-        self.stop()
+    async def handle_cancel(self, interaction: discord.Interaction) -> None:
+        await self._on_cancel(interaction)
 
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True  # type: ignore[attr-defined]
-
-
-class LobbyView(discord.ui.View):
-    """Join/Leave/Start prompt for modes that take more than two players
-    (or any mode started without a specific `opponent:` — players simply
-    select the mode and join).
-    """
-
-    def __init__(
-        self,
-        *,
-        mode: "BattleMode",
-        host_id: int,
-        on_join: Callable[[discord.Interaction], Awaitable[None]],
-        on_leave: Callable[[discord.Interaction], Awaitable[None]],
-        on_start: Callable[[discord.Interaction], Awaitable[None]],
-        timeout: float = 600.0,
-    ):
-        super().__init__(timeout=timeout)
-        self.mode = mode
-        self.host_id = host_id
-        self._on_join = on_join
-        self._on_leave = on_leave
-        self._on_start = on_start
-        self.add_item(JoinButton())
-        self.add_item(LeaveButton())
-        self.add_item(StartButton())
-
-    async def handle_join(self, interaction: discord.Interaction) -> None:
-        await self._on_join(interaction)
-
-    async def handle_leave(self, interaction: discord.Interaction) -> None:
-        await self._on_leave(interaction)
-
-    async def handle_start(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.host_id:
-            await interaction.response.send_message("Only the lobby host can start the battle.", ephemeral=True)
-            return
-        await self._on_start(interaction)
-
-
-class ModePickerView(discord.ui.View):
-    """Shown when a player runs `/battle start` without specifying a mode
-    explicitly enough (or wants to browse) — lists every enabled mode,
-    built-in and custom, together.
-    """
-
-    def __init__(self, modes: list["BattleMode"], *, on_choice: Callable[[discord.Interaction, "BattleMode"], Awaitable[None]], timeout: float = 60.0):
-        super().__init__(timeout=timeout)
-        self._modes_by_id = {str(m.pk): m for m in modes}
-        self._on_choice = on_choice
-        options = [
-            discord.SelectOption(label=m.name, description=(m.description or "")[:100], value=str(m.pk), emoji=m.icon or None)
-            for m in modes
-        ]
-        select = ModeSelect(options)
-        select.callback = self._callback  # type: ignore[method-assign]
-        self.add_item(select)
-
-    async def _callback(self, interaction: discord.Interaction) -> None:
-        select: ModeSelect = self.children[0]  # type: ignore[assignment]
-        mode = self._modes_by_id.get(select.values[0])
-        if mode is not None:
-            await self._on_choice(interaction, mode)
-        self.stop()
 
 
 class AbilityChoiceView(discord.ui.View):
@@ -189,6 +104,8 @@ class BattleView(discord.ui.View):
         battle: "Battle",
         participant_ids: list[int],
         user_id_by_participant: dict[int, int],
+        cooldowns: dict[int, dict[str, int]],
+        heal_uses: dict[int, int],
         on_turn_complete: TurnCompleteCallback,
         timeout: float,
     ):
@@ -199,9 +116,11 @@ class BattleView(discord.ui.View):
         self.user_id_to_participant = {v: k for k, v in user_id_by_participant.items()}
 
         self.enabled_actions: list[str] = (battle.config_snapshot or {}).get("enabled_actions") or [a.value for a in ACTIONS]
-        state = battle.state or {}
-        self.cooldowns: dict[int, dict[str, int]] = {pid: dict(state.get("cooldowns", {}).get(str(pid), {})) for pid in participant_ids}
-        self.heal_uses: dict[int, int] = {pid: state.get("heal_uses", {}).get(str(pid), 0) for pid in participant_ids}
+        # Cooldowns/heal-uses come straight from `BattleParticipant` rows
+        # (passed in by the caller) — not from `Battle.state`, which never
+        # stores per-participant cooldown data.
+        self.cooldowns: dict[int, dict[str, int]] = {pid: dict(cooldowns.get(pid, {})) for pid in participant_ids}
+        self.heal_uses: dict[int, int] = {pid: heal_uses.get(pid, 0) for pid in participant_ids}
         self.max_heal_uses = (battle.config_snapshot or {}).get("heal_uses_per_battle", 3)
 
         self.choices: dict[int, ActionKey | None] = {pid: None for pid in participant_ids}
@@ -267,15 +186,12 @@ class BattleView(discord.ui.View):
     async def _prompt_target_or_lock(self, interaction: discord.Interaction, participant_id: int, action: ActionKey) -> None:
         from battles.models import BattleParticipant
 
+        me_row = await BattleParticipant.objects.aget(pk=participant_id)
         enemies = [
             p async for p in BattleParticipant.objects.select_related("ball_instance__ball").filter(
                 battle_id=self.battle_id, is_alive=True, is_spectator=False,
-            ) if p.pk != participant_id
+            ) if p.pk != participant_id and (me_row.team is None or p.team != me_row.team)
         ]
-        # Exclude teammates, if this battle has teams.
-        me_row = await BattleParticipant.objects.aget(pk=participant_id)
-        if me_row.team is not None:
-            enemies = [e for e in enemies if e.team != me_row.team]
 
         if len(enemies) <= 1:
             target_id = enemies[0].pk if enemies else None
@@ -301,7 +217,7 @@ class BattleView(discord.ui.View):
         from battles.models import Ability, BattleParticipant
 
         participant = await BattleParticipant.objects.select_related("ball_instance__ball").aget(pk=participant_id)
-        ball = participant.ball_instance.ball
+        ball = participant.ball_instance.countryball
 
         from .abilities import get_usable_abilities
         from .integrations.balls import ball_economy_id, ball_rarity, ball_regime_id
