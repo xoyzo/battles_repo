@@ -12,16 +12,31 @@ class BattleConfigForm(forms.ModelForm):
         exclude = ["updated_at"]
 
 
+_ACTION_CHOICES = [
+    ("attack", "Attack"), ("defend", "Defend"), ("counter", "Counter"),
+    ("heal", "Heal"), ("dodge", "Dodge"), ("ability", "Ability"),
+]
+
+
 class BattleModeForm(forms.ModelForm):
+    # `enabled_actions` is a JSONField, whose auto-generated form field
+    # expects a raw JSON *string* to parse. Pairing that with a
+    # CheckboxSelectMultiple widget (which submits a list) crashes on
+    # save — `forms.JSONField.to_python()` can't `json.loads()` a list.
+    # Declaring it explicitly as a MultipleChoiceField sidesteps the
+    # auto-generated field entirely; Django assigns the resulting list
+    # straight onto the JSONField model attribute, which is exactly what
+    # a JSONField expects.
+    enabled_actions = forms.MultipleChoiceField(
+        choices=_ACTION_CHOICES, required=False, widget=forms.CheckboxSelectMultiple,
+        help_text="Leave everything unchecked to enable all actions.",
+    )
+
     class Meta:
         model = BattleMode
         exclude = ["created_at", "updated_at"]
         widgets = {
             "description": forms.Textarea(attrs={"rows": 3}),
-            "enabled_actions": forms.CheckboxSelectMultiple(choices=[
-                ("attack", "Attack"), ("defend", "Defend"), ("counter", "Counter"),
-                ("heal", "Heal"), ("dodge", "Dodge"), ("ability", "Ability"),
-            ]),
             "allowed_rarities": forms.TextInput(attrs={"placeholder": '["common", "rare"] (JSON list, empty = unrestricted)'}),
             "blocked_rarities": forms.TextInput(attrs={"placeholder": '["legendary"] (JSON list)'}),
         }
