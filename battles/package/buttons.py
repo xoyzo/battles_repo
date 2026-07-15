@@ -1,5 +1,13 @@
 """Discord button/select components used across the battle lobby and the
 per-turn action-selection view.
+
+Deck-building (picking which ball to fight with) happens through
+`/battle add` and `/battle remove` slash commands — which get real
+autocomplete via `BallInstanceTransform` — rather than through a button
+that pops up an ephemeral picker; chaining ephemeral views inside a button
+callback inside another view is exactly the kind of thing that's fragile
+in practice. Buttons here are only used for choices that make sense as a
+one-tap interaction: battle turn actions, and starting/cancelling a lobby.
 """
 from __future__ import annotations
 
@@ -14,7 +22,7 @@ if TYPE_CHECKING:
 
 
 class ActionButton(discord.ui.Button["BattleView"]):
-    def __init__(self, action: ActionKey, *, row: int = 0, disabled: bool = False):
+    def __init__(self, action: ActionKey, *, row: int | None = None, disabled: bool = False):
         definition = ACTIONS[action]
         super().__init__(
             label=definition.label,
@@ -72,71 +80,31 @@ class TargetSelect(discord.ui.Select["BattleView"]):
         await self.view.handle_target_choice(interaction, self.values[0])
 
 
-class ModeSelect(discord.ui.Select["LobbyView"]):
-    def __init__(self, options: list[discord.SelectOption]):
-        super().__init__(
-            placeholder="Choose a battle mode...",
-            min_values=1, max_values=1, options=options,
-            custom_id="battles:mode_select",
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        assert self.view is not None
-        await self.view.handle_mode_choice(interaction, self.values[0])
-
-
-class JoinButton(discord.ui.Button["LobbyView"]):
+class BeginButton(discord.ui.Button["LobbyView"]):
     def __init__(self):
-        super().__init__(label="Join", emoji="🙋", style=discord.ButtonStyle.success, custom_id="battles:join")
+        super().__init__(label="Begin Battle", emoji="🏁", style=discord.ButtonStyle.primary, custom_id="battles:begin")
 
     async def callback(self, interaction: discord.Interaction) -> None:
         assert self.view is not None
-        await self.view.handle_join(interaction)
+        await self.view.handle_begin(interaction)
 
 
-class LeaveButton(discord.ui.Button["LobbyView"]):
+class CancelLobbyButton(discord.ui.Button["LobbyView"]):
     def __init__(self):
-        super().__init__(label="Leave", emoji="🚪", style=discord.ButtonStyle.secondary, custom_id="battles:leave")
+        super().__init__(label="Cancel", emoji="🚫", style=discord.ButtonStyle.danger, custom_id="battles:cancel_lobby")
 
     async def callback(self, interaction: discord.Interaction) -> None:
         assert self.view is not None
-        await self.view.handle_leave(interaction)
-
-
-class StartButton(discord.ui.Button["LobbyView"]):
-    def __init__(self):
-        super().__init__(label="Start Battle", emoji="🏁", style=discord.ButtonStyle.primary, custom_id="battles:start")
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        assert self.view is not None
-        await self.view.handle_start(interaction)
+        await self.view.handle_cancel(interaction)
 
 
 class SurrenderButton(discord.ui.Button["BattleView"]):
     def __init__(self):
-        super().__init__(label="Surrender", emoji="🏳️", style=discord.ButtonStyle.danger, row=1, custom_id="battles:surrender")
+        super().__init__(label="Surrender", emoji="🏳️", style=discord.ButtonStyle.danger, custom_id="battles:surrender")
 
     async def callback(self, interaction: discord.Interaction) -> None:
         assert self.view is not None
         await self.view.handle_surrender(interaction)
-
-
-class ConfirmButton(discord.ui.Button):
-    def __init__(self, *, label: str = "Accept", style: discord.ButtonStyle = discord.ButtonStyle.success):
-        super().__init__(label=label, style=style, custom_id="battles:confirm")
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        assert self.view is not None
-        await self.view.handle_confirm(interaction)  # type: ignore[attr-defined]
-
-
-class DeclineButton(discord.ui.Button):
-    def __init__(self, *, label: str = "Decline", style: discord.ButtonStyle = discord.ButtonStyle.danger):
-        super().__init__(label=label, style=style, custom_id="battles:decline")
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        assert self.view is not None
-        await self.view.handle_decline(interaction)  # type: ignore[attr-defined]
 
 
 class RematchButton(discord.ui.Button):
