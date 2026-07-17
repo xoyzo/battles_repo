@@ -22,16 +22,16 @@ def apply_patches() -> None:
         return
 
     try:
-        from ballsdex.core.models import BallInstance
+        from bd_models.models import BallInstance
     except ImportError:
         log.warning("bd_models.BallInstance not importable; skipping battle monkeypatches.")
         return
 
     if not hasattr(BallInstance, "get_battle_stats"):
-        async def get_battle_stats(self):  # noqa: ANN001 - patched onto BallInstance
+        def get_battle_stats(self):  # noqa: ANN001 - patched onto BallInstance
             from .integrations.balls import get_battle_stats as _get_battle_stats
 
-            return await _get_battle_stats(self.ball)
+            return _get_battle_stats(self)
 
         BallInstance.get_battle_stats = get_battle_stats  # type: ignore[attr-defined]
 
