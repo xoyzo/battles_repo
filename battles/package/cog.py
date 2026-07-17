@@ -32,13 +32,17 @@ if TYPE_CHECKING:
 log = logging.getLogger("battles.cog")
 
 
-class BattlesCog(commands.GroupCog, group_name="battle"):
+class BattlesCog(commands.GroupCog, group_name="battle", group_description="Challenge other players to interactive ball battles."):
     """Interactive, button-driven PvP battles between BallsDex players,
     played under dashboard-authored modes and abilities.
 
     Command flow mirrors `/trade`: `start` opens a lobby, `add`/`remove`
     build your deck (real autocomplete via `BallInstanceTransform`, no
     raw IDs), and `begin` launches the battle once enough players are in.
+
+    Note: `commands.GroupCog` would otherwise use this docstring itself as
+    the Discord-facing group description, which has a hard 100-character
+    limit — passing `group_description` explicitly above avoids that.
     """
 
     def __init__(self, bot: "BallsDexBot") -> None:
