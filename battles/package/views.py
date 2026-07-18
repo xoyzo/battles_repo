@@ -35,20 +35,41 @@ TurnCompleteCallback = Callable[["BattleView"], Awaitable[None]]
 
 
 class LobbyView(discord.ui.View):
-    """Begin/Cancel prompt for a battle waiting on players to `/battle add`."""
+    """Begin/Cancel prompt for a battle waiting on players to `/battle add`.
+
+    Restricted to users who've actually seated themselves in *this*
+    lobby via `/battle add` — without this check, anyone who can see the
+    message (i.e. anyone in the channel) could Begin or Cancel a lobby
+    they were never part of.
+    """
 
     def __init__(
         self,
         *,
+        battle_id: int,
         on_begin: Callable[[discord.Interaction], Awaitable[None]],
         on_cancel: Callable[[discord.Interaction], Awaitable[None]],
         timeout: float = 600.0,
     ):
         super().__init__(timeout=timeout)
+        self.battle_id = battle_id
         self._on_begin = on_begin
         self._on_cancel = on_cancel
         self.add_item(BeginButton())
         self.add_item(CancelLobbyButton())
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        from battles.models import BattleParticipant
+
+        is_seated = await BattleParticipant.objects.filter(
+            battle_id=self.battle_id, user_id=interaction.user.id,
+        ).aexists()
+        if not is_seated:
+            await interaction.response.send_message(
+                "You need to `/battle add` a ball to this lobby before you can do that.", ephemeral=True,
+            )
+            return False
+        return True
 
     async def handle_begin(self, interaction: discord.Interaction) -> None:
         await self._on_begin(interaction)
