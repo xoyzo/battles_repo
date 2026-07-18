@@ -116,6 +116,24 @@ class TargetChoiceView(discord.ui.View):
         self.stop()
 
 
+class BallChoiceView(discord.ui.View):
+    """Ephemeral view letting a player with more than one ball still
+    needing an action this turn pick which one this button press is for.
+    """
+
+    def __init__(self, options: list[discord.SelectOption], *, on_choice: Callable[[discord.Interaction, str], Awaitable[None]], timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self._on_choice = on_choice
+        select = discord.ui.Select(placeholder="Which of your balls?", min_values=1, max_values=1, options=options)
+        select.callback = self._callback  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _callback(self, interaction: discord.Interaction) -> None:
+        select: discord.ui.Select = self.children[0]  # type: ignore[assignment]
+        await self._on_choice(interaction, select.values[0])
+        self.stop()
+
+
 class BattleView(discord.ui.View):
     """Collects every alive participant's action choice for a single turn."""
 
@@ -134,7 +152,13 @@ class BattleView(discord.ui.View):
         self.battle_id = battle.pk
         self.participant_ids = participant_ids
         self.user_id_by_participant = user_id_by_participant
-        self.user_id_to_participant = {v: k for k, v in user_id_by_participant.items()}
+        # A user may control more than one ball (multi-ball decks), so this
+        # maps user_id -> *all* of their participant ids, not just one —
+        # inverting user_id_by_participant one-to-one would silently drop
+        # every ball after their first.
+        self.participants_by_user: dict[int, list[int]] = {}
+        for pid, uid in user_id_by_participant.items():
+            self.participants_by_user.setdefault(uid, []).append(pid)
 
         self.enabled_actions: list[str] = (battle.config_snapshot or {}).get("enabled_actions") or [a.value for a in ACTIONS]
         # Cooldowns/heal-uses come straight from `BattleParticipant` rows
@@ -147,7 +171,7 @@ class BattleView(discord.ui.View):
         self.choices: dict[int, ActionKey | None] = {pid: None for pid in participant_ids}
         self.target_choice: dict[int, int | None] = {pid: None for pid in participant_ids}
         self.ability_choice: dict[int, int | None] = {pid: None for pid in participant_ids}
-        self.surrendered_participant_id: int | None = None
+        self.surrendered_participant_ids: list[int] = []
 
         self._on_turn_complete = on_turn_complete
         self._resolved = False
@@ -160,8 +184,12 @@ class BattleView(discord.ui.View):
         self.add_item(SurrenderButton())
 
     # -- validation -------------------------------------------------------
-    def _participant_for(self, user_id: int) -> int | None:
-        return self.user_id_to_participant.get(user_id)
+    def _pending_participants_for(self, user_id: int) -> list[int]:
+        """All of this user's ball(s) in the battle that haven't locked in
+        an action yet this turn — usually one, but more than one if they
+        fielded multiple balls via `/battle add`.
+        """
+        return [pid for pid in self.participants_by_user.get(user_id, []) if self.choices.get(pid) is None]
 
     def _on_cooldown(self, participant_id: int, action: ActionKey) -> bool:
         definition = ACTIONS[action]
@@ -173,25 +201,46 @@ class BattleView(discord.ui.View):
         return self.heal_uses.get(participant_id, 0) >= self.max_heal_uses
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        participant_id = self._participant_for(interaction.user.id)
-        if participant_id is None:
+        if interaction.user.id not in self.participants_by_user:
             await interaction.response.send_message("You're not part of this battle.", ephemeral=True)
             return False
-        if self.choices[participant_id] is not None:
-            await interaction.response.send_message("You've already locked in your move this turn.", ephemeral=True)
+        if not self._pending_participants_for(interaction.user.id):
+            await interaction.response.send_message("You've already locked in your move(s) this turn.", ephemeral=True)
             return False
         return True
 
     # -- action handling ----------------------------------------------------
     async def handle_action_choice(self, interaction: discord.Interaction, action: ActionKey) -> None:
-        participant_id = self._participant_for(interaction.user.id)
-        assert participant_id is not None
+        pending = self._pending_participants_for(interaction.user.id)
 
+        if len(pending) == 1:
+            await self._continue_action_choice(interaction, pending[0], action)
+            return
+
+        # More than one ball still needs an action this turn — ask which
+        # one this button press is for before doing anything else.
+        from battles.models import BattleParticipant
+
+        from .integrations.balls import ball_display_name
+
+        rows = [p async for p in BattleParticipant.objects.select_related("ball_instance__ball").filter(pk__in=pending)]
+        options = [
+            discord.SelectOption(label=ball_display_name(r.ball_instance), description=f"HP {max(0, r.hp)}/{r.max_hp}", value=str(r.pk))
+            for r in rows
+        ]
+
+        async def on_choice(inner_interaction: discord.Interaction, value: str) -> None:
+            await self._continue_action_choice(inner_interaction, int(value), action)
+
+        view = BallChoiceView(options, on_choice=on_choice)
+        await interaction.response.send_message("Which of your balls is this for?", view=view, ephemeral=True)
+
+    async def _continue_action_choice(self, interaction: discord.Interaction, participant_id: int, action: ActionKey) -> None:
         if self._on_cooldown(participant_id, action):
-            await interaction.response.send_message(f"{ACTIONS[action].label} is on cooldown for you this turn.", ephemeral=True)
+            await interaction.response.send_message(f"{ACTIONS[action].label} is on cooldown for that ball this turn.", ephemeral=True)
             return
         if action is ActionKey.HEAL and self._heal_exhausted(participant_id):
-            await interaction.response.send_message("You have no Heal uses left this battle.", ephemeral=True)
+            await interaction.response.send_message("That ball has no Heal uses left this battle.", ephemeral=True)
             return
 
         if action is ActionKey.ABILITY:
@@ -286,14 +335,14 @@ class BattleView(discord.ui.View):
             await self._on_turn_complete(self)
 
     async def handle_surrender(self, interaction: discord.Interaction) -> None:
-        participant_id = self._participant_for(interaction.user.id)
-        if participant_id is None:
+        pids = self.participants_by_user.get(interaction.user.id, [])
+        if not pids:
             await interaction.response.send_message("You're not part of this battle.", ephemeral=True)
             return
         await interaction.response.send_message("You surrendered.", ephemeral=True)
         if not self._resolved:
             self._resolved = True
-            self.surrendered_participant_id = participant_id
+            self.surrendered_participant_ids = pids
             self.stop()
             await self._on_turn_complete(self)
 
