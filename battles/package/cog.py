@@ -386,8 +386,8 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         all_participants = [p async for p in BattleParticipant.objects.select_related("ball_instance__ball").filter(battle_id=battle_id)]
         participants_by_id = {p.pk: p for p in all_participants}
 
-        if view.surrendered_participant_id is not None:
-            loser = participants_by_id.get(view.surrendered_participant_id)
+        for surrendered_pid in view.surrendered_participant_ids:
+            loser = participants_by_id.get(surrendered_pid)
             if loser is not None:
                 loser.hp = 0
                 loser.is_alive = False
@@ -434,9 +434,16 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             ability = await Ability.objects.filter(pk=act.ability_id, is_enabled=True).afirst()
             if participant is None or ability is None:
                 continue
-            ctx = self._build_ability_context(battle, all_participants, pid, "execute")
-            await trigger_ability(ability, "execute", ctx)
-            self._apply_ability_effects(battle, participants_by_id, ctx, currency_grants)
+            try:
+                ctx = self._build_ability_context(battle, all_participants, pid, "execute")
+                if ctx is None:
+                    log.warning("Could not build ability context for participant %s (ability %s); skipping activation.", pid, ability.pk)
+                    continue
+                await trigger_ability(ability, "execute", ctx)
+                self._apply_ability_effects(battle, participants_by_id, ctx, currency_grants)
+            except Exception:  # noqa: BLE001 - one broken ability activation must never stall the whole turn
+                log.exception("Ability %s activation failed for participant %s; skipping.", ability.pk, pid)
+                continue
             ability_used_this_turn[pid] = ability
             uses = dict(participant.ability_uses or {})
             uses[str(ability.pk)] = uses.get(str(ability.pk), 0) + 1
