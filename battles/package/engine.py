@@ -162,6 +162,14 @@ def resolve_turn(
 ) -> TurnResult:
     """Resolve one simultaneous-reveal turn across every acting participant."""
 
+    # A participant already at 0 HP *before* this turn's combat resolves
+    # (typically from an ability's direct damage, applied earlier in the
+    # same turn) can't act at all this turn — most importantly, they can't
+    # Heal their way back from a kill that already happened. Their action
+    # is simply dropped; the loops below already treat a missing action as
+    # a no-op via `outcomes.get(pid)`/`pid in actions` checks.
+    actions = {pid: act for pid, act in actions.items() if participants[pid].hp > 0}
+
     outcomes: dict[ParticipantId, ParticipantOutcome] = {
         pid: ParticipantOutcome(participant_id=pid, action=act.action) for pid, act in actions.items()
     }
