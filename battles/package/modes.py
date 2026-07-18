@@ -113,12 +113,18 @@ class DeckValidationError:
     reason: str
 
 
-async def validate_deck(mode: BattleMode, ball_instances: list) -> DeckValidationError | None:
+async def validate_deck(mode: BattleMode, ball_instances: list, *, enforce_min: bool = True) -> DeckValidationError | None:
     """Check a player's chosen ball(s) against a mode's deck rules. Returns
     None if valid, or a `DeckValidationError` describing the first problem.
+
+    `enforce_min=False` skips the `min_deck_size` floor — used while a
+    player is still incrementally building their deck via `/battle add`,
+    where requiring the full minimum on the very first ball added would
+    make it impossible to ever reach it. The floor is instead checked once,
+    per player, at `/battle begin` time (see `cog.py`).
     """
     count = len(ball_instances)
-    if count < mode.min_deck_size:
+    if enforce_min and count < mode.min_deck_size:
         return DeckValidationError(f"This mode requires at least {mode.min_deck_size} ball(s).")
     if count > mode.max_deck_size:
         return DeckValidationError(f"This mode allows at most {mode.max_deck_size} ball(s).")
