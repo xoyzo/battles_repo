@@ -445,13 +445,16 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         engine_participants: dict[int, ParticipantContext] = {}
         for pid in view.participant_ids:
             p = participants_by_id[pid]
+            shield_hp, vulnerable_to, damage_taken_multiplier = self._read_status_effects(battle, pid)
             engine_participants[pid] = ParticipantContext(
                 participant_id=pid, team=p.team, hp=p.hp, max_hp=p.max_hp,
                 attack=p.attack, defense=p.defense, momentum=p.momentum,
                 cooldowns=dict(p.cooldowns or {}), heal_uses=p.heal_uses, is_alive=p.is_alive,
+                shield_hp=shield_hp, vulnerable_to=vulnerable_to, damage_taken_multiplier=damage_taken_multiplier,
             )
 
         result: TurnResult = resolve_turn(engine_participants, actions, snapshot)
+        self._tick_status_effects(battle, result)
 
         for pid in view.participant_ids:
             if view.choices.get(pid) is None and timeout_behavior != "skip_turn":
@@ -640,7 +643,16 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         def _state(p: BattleParticipant | None) -> dict:
             if p is None:
                 return {"hp": 0, "momentum": 0}
-            return {"hp": p.hp, "momentum": p.momentum, "participant_id": p.pk}
+            return {
+                "hp": p.hp,
+                "max_hp": p.max_hp,
+                "momentum": p.momentum,
+                "participant_id": p.pk,
+                "name": ball_display_name(p.ball_instance),
+                "attack": p.attack,
+                "defense": p.defense,
+                "team": p.team,
+            }
 
         return AbilityContext(
             battle_id=battle.pk, turn_number=battle.current_turn, self_side=str(participant_id),
@@ -692,18 +704,100 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         for user_id, amount in currency_grants:
             await award_currency(self.bot, user_id, amount, reason=f"ability-{hook_name}")
 
+    def _read_status_effects(self, battle: Battle, participant_id: int) -> tuple[int, dict[int, float], float]:
+        """Collapse a participant's active `Battle.state["effects"]` entries
+        into what `engine.ParticipantContext` actually understands: total
+        shield HP, a per-attacker vulnerability multiplier map, and a
+        generic (attacker-agnostic) incoming-damage multiplier.
+
+        Effect dict shape, as authored by ability scripts via
+        `ctx.add_effect({...})`:
+          - {"kind": "shield", "amount": <flat HP to absorb>, "duration": <turns>}
+          - {"kind": "vulnerable", "amount": <multiplier>, "duration": <turns>,
+             "source_participant_id": <int, optional>}
+            Omitting `source_participant_id` makes it apply to damage from
+            any attacker; setting it restricts the multiplier to hits from
+            that one specific participant.
+          - {"kind": "protected", "amount": <multiplier, e.g. 0.0-1.0>, "duration": <turns>}
+        """
+        effects = ((battle.state or {}).get("effects", {})).get(str(participant_id), [])
+        shield_hp = 0
+        vulnerable_to: dict[int, float] = {}
+        damage_taken_multiplier = 1.0
+
+        for effect in effects:
+            if effect.get("duration", 0) <= 0:
+                continue
+            kind = effect.get("kind")
+            if kind == "shield":
+                shield_hp += max(0, int(effect.get("amount", 0)))
+            elif kind == "vulnerable":
+                multiplier = float(effect.get("amount", 1.0))
+                source = effect.get("source_participant_id")
+                if source is not None:
+                    vulnerable_to[int(source)] = vulnerable_to.get(int(source), 1.0) * multiplier
+                else:
+                    damage_taken_multiplier *= multiplier
+            elif kind == "protected":
+                damage_taken_multiplier *= float(effect.get("amount", 1.0))
+
+        return shield_hp, vulnerable_to, damage_taken_multiplier
+
+    def _tick_status_effects(self, battle: Battle, result: TurnResult) -> None:
+        """Decrement every active effect's remaining duration by one turn,
+        collapse shield effects down to whatever the engine reports was
+        actually left after this turn's damage, and drop anything expired
+        or fully depleted.
+        """
+        state = battle.state or {}
+        effects_state = dict(state.get("effects", {}))
+
+        for pid_str in list(effects_state.keys()):
+            pid = int(pid_str)
+            effects = effects_state.get(pid_str, [])
+            shield_effects = [e for e in effects if e.get("kind") == "shield"]
+            other_effects = [e for e in effects if e.get("kind") != "shield"]
+
+            updated: list[dict] = []
+
+            remaining_shield = result.new_shield_hp.get(pid)
+            if shield_effects and remaining_shield:
+                longest_duration = max((e.get("duration", 1) for e in shield_effects), default=1)
+                new_duration = longest_duration - 1
+                if new_duration > 0 and remaining_shield > 0:
+                    updated.append({"kind": "shield", "amount": remaining_shield, "duration": new_duration})
+
+            for effect in other_effects:
+                new_duration = effect.get("duration", 1) - 1
+                if new_duration <= 0:
+                    continue
+                effect = dict(effect)
+                effect["duration"] = new_duration
+                updated.append(effect)
+
+            if updated:
+                effects_state[pid_str] = updated
+            else:
+                effects_state.pop(pid_str, None)
+
+        state["effects"] = effects_state
+        battle.state = state
+
     def _apply_ability_effects(self, battle: Battle, participants_by_id: dict[int, BattleParticipant], ctx: AbilityContext, currency_grants: list[tuple[int, int]]) -> None:
         state = battle.state or {}
         effects_state = state.setdefault("effects", {})
 
         def _resolve_target(side: str) -> BattleParticipant | None:
+            if side == "self":
+                side = ctx.self_side
+            elif side == "opponent":
+                side = ctx.opponent_side
             if not side or not side.isdigit():
                 return None
             return participants_by_id.get(int(side))
 
         for queued in ctx.effects:
-            target_side = ctx.self_side if queued.target == "self" else ctx.opponent_side
-            target = _resolve_target(target_side)
+            target = _resolve_target(queued.target)
             if target is None:
                 continue
 
