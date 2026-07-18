@@ -11,9 +11,13 @@ about/replay.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-Target = Literal["self", "opponent"]
+Target = str
+"""`"self"`, `"opponent"` (the primary detected opponent), or a specific
+participant's id as a string (e.g. `str(ally["participant_id"])` from
+`ctx.get_teammates()` / `ctx.get_enemies()`) — for abilities that affect
+more than one target at once."""
 
 
 @dataclass
