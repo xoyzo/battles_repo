@@ -58,7 +58,22 @@ def compute_damage(
 ) -> DamageResult:
     """Compute damage for an Attack action landing on an undefended target.
 
-    damage = (attacker_attack * attack_multiplier) - (defender_defense * defense_multiplier)
+    Uses ratio-based mitigation rather than flat subtraction:
+
+        raw = effective_attack * (effective_attack / (effective_attack + effective_defense))
+
+    Flat subtraction (`attack - defense`) crushes anything whose attack
+    isn't comfortably ahead of the opponent's defense down to the damage
+    floor on nearly every hit, because Attack and Defense here are both
+    derived from the same real ball stats and land in similar ranges —
+    a ball with 400 attack facing 350 defense would deal essentially
+    nothing under subtraction, even though it's a perfectly fair matchup.
+    Ratio-based mitigation keeps damage roughly proportional to the
+    attacker's own stat regardless of the absolute scale involved: equal
+    attack/defense trades ~50% of attack as damage, and the split shifts
+    smoothly as the gap widens either way, so low-attack balls still hit
+    meaningfully instead of bottoming out at `minimum_damage` every turn.
+
     Then momentum and ability/regime multipliers are layered on, a
     critical-hit roll is applied, and the result is clamped to the
     configured minimum.
@@ -69,8 +84,12 @@ def compute_damage(
     crit_chance = snapshot.get("critical_hit_chance", 0.10)
     crit_multiplier = snapshot.get("critical_hit_multiplier", 1.5)
 
-    raw = (attacker_attack * attack_multiplier) - (defender_defense * defense_multiplier)
-    raw = max(0.0, raw)
+    effective_attack = max(0.0, attacker_attack * attack_multiplier)
+    effective_defense = max(0.0, defender_defense * defense_multiplier)
+    if effective_attack <= 0:
+        raw = 0.0
+    else:
+        raw = effective_attack * (effective_attack / (effective_attack + effective_defense))
 
     labels: list[str] = list(extra_labels or [])
 
