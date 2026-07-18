@@ -524,7 +524,11 @@ class BattleParticipant(models.Model):
     class Meta:
         verbose_name = "battle participant"
         verbose_name_plural = "battle participants"
-        unique_together = ("battle", "user_id")
+        # A user may field more than one ball (up to the mode's
+        # max_deck_size) via repeated /battle add calls — each is its own
+        # combatant seat — so uniqueness is per (battle, user, ball), not
+        # per (battle, user).
+        unique_together = ("battle", "user_id", "ball_instance")
         ordering = ["battle", "join_order"]
 
     def __str__(self) -> str:
