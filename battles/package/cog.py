@@ -97,6 +97,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         mention = f" {opponent.mention}, you've been invited!" if opponent else ""
         embed = embeds.build_lobby_embed(mode, [])
         view = LobbyView(
+            battle_id=battle.pk,
             on_begin=lambda i: self._handle_begin(i, battle.pk),
             on_cancel=lambda i: self._handle_cancel_lobby(i, battle.pk),
         )
@@ -108,7 +109,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         battle.message_id = message.id
         await battle.asave(update_fields=["message_id"])
 
-    @app_commands.command(name="add", description="Add a ball to your current battle lobby.")
+    @app_commands.command(name="add", description="Add a ball to your current battle lobby. Call it again to add more, up to the mode's deck size.")
     @app_commands.describe(countryball="The ball you want to fight with")
     async def add(self, interaction: discord.Interaction, countryball: BallInstanceTransform) -> None:
         battle = await self._find_open_lobby(interaction.channel_id or 0, interaction.user.id)
@@ -117,34 +118,49 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             return
 
         mode = await BattleMode.objects.aget(pk=battle.mode_id)
-        current_count = await BattleParticipant.objects.filter(battle_id=battle.pk).exclude(user_id=interaction.user.id).acount()
-        already_seated = await BattleParticipant.objects.filter(battle_id=battle.pk, user_id=interaction.user.id).aexists()
-        if not already_seated and current_count >= mode.max_players:
-            await interaction.response.send_message("This lobby is full.", ephemeral=True)
+        my_seats = [p async for p in BattleParticipant.objects.select_related("ball_instance__ball").filter(battle_id=battle.pk, user_id=interaction.user.id)]
+
+        if any(p.ball_instance_id == countryball.pk for p in my_seats):
+            await interaction.response.send_message(f"{ball_display_name(countryball)} is already in your deck for this battle.", ephemeral=True)
             return
 
-        deck_error = await modes.validate_deck(mode, [countryball])
+        if len(my_seats) >= mode.max_deck_size:
+            await interaction.response.send_message(f"'{mode.name}' only allows {mode.max_deck_size} ball(s) per player — remove one with `/battle remove` first.", ephemeral=True)
+            return
+
+        if not my_seats:
+            distinct_players = await BattleParticipant.objects.filter(battle_id=battle.pk).values("user_id").distinct().acount()
+            if distinct_players >= mode.max_players:
+                await interaction.response.send_message("This lobby is full.", ephemeral=True)
+                return
+
+        # Re-validate the whole deck-in-progress (not just the new ball) so
+        # duplicate-species rules and deck-size limits are checked against
+        # what the player will actually field.
+        deck_error = await modes.validate_deck(mode, [p.ball_instance for p in my_seats] + [countryball], enforce_min=False)
         if deck_error is not None:
             await interaction.response.send_message(deck_error.reason, ephemeral=True)
             return
 
-        await BattleParticipant.objects.aupdate_or_create(
-            battle=battle, user_id=interaction.user.id,
-            defaults={"ball_instance": countryball, "join_order": current_count},
+        next_join_order = await BattleParticipant.objects.filter(battle_id=battle.pk).acount()
+        await BattleParticipant.objects.acreate(
+            battle=battle, user_id=interaction.user.id, ball_instance=countryball, join_order=next_join_order,
         )
-        await interaction.response.send_message(f"{ball_display_name(countryball)} added — you're in the lobby.", ephemeral=True)
+        deck_note = f" ({len(my_seats) + 1}/{mode.max_deck_size} balls)" if mode.max_deck_size > 1 else ""
+        await interaction.response.send_message(f"{ball_display_name(countryball)} added{deck_note} — you're in the lobby.", ephemeral=True)
         await self._refresh_lobby_message(battle, mode)
 
-    @app_commands.command(name="remove", description="Leave your current battle lobby.")
-    async def remove(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="remove", description="Remove one of your balls from your current battle lobby.")
+    @app_commands.describe(countryball="The ball to remove from your deck")
+    async def remove(self, interaction: discord.Interaction, countryball: BallInstanceTransform) -> None:
         battle = await self._find_open_lobby(interaction.channel_id or 0, interaction.user.id)
         if battle is None:
             await interaction.response.send_message("You're not in a battle lobby in this channel.", ephemeral=True)
             return
 
-        deleted, _ = await BattleParticipant.objects.filter(battle_id=battle.pk, user_id=interaction.user.id).adelete()
+        deleted, _ = await BattleParticipant.objects.filter(battle_id=battle.pk, user_id=interaction.user.id, ball_instance=countryball).adelete()
         if not deleted:
-            await interaction.response.send_message("You weren't in that lobby's roster.", ephemeral=True)
+            await interaction.response.send_message("That ball isn't in your deck for this lobby.", ephemeral=True)
             return
 
         await interaction.response.send_message("You left the lobby.", ephemeral=True)
@@ -208,8 +224,8 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             invited = (battle.state or {}).get("invited_user_ids") or []
             if invited and user_id not in invited:
                 continue
-            seat_count = await BattleParticipant.objects.filter(battle_id=battle.pk).acount()
-            if seat_count >= battle.mode.max_players:
+            distinct_players = await BattleParticipant.objects.filter(battle_id=battle.pk).values("user_id").distinct().acount()
+            if distinct_players >= battle.mode.max_players:
                 continue
             return battle
 
@@ -222,11 +238,15 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         except discord.HTTPException:
             return
         participants = [p async for p in BattleParticipant.objects.select_related("ball_instance__ball").filter(battle_id=battle.pk).order_by("join_order")]
-        names = []
+        balls_by_user: dict[int, list[str]] = {}
         for p in participants:
-            member = message.guild.get_member(p.user_id) if message.guild else None
-            display = member.display_name if member else f"<@{p.user_id}>"
-            names.append(f"{display} — {ball_display_name(p.ball_instance)}")
+            balls_by_user.setdefault(p.user_id, []).append(ball_display_name(p.ball_instance))
+
+        names = []
+        for user_id, ball_names in balls_by_user.items():
+            member = message.guild.get_member(user_id) if message.guild else None
+            display = member.display_name if member else f"<@{user_id}>"
+            names.append(f"{display} — {', '.join(ball_names)}")
         embed = embeds.build_lobby_embed(mode, names)
         await message.edit(embed=embed)
 
@@ -237,9 +257,23 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             return
 
         participants = [p async for p in BattleParticipant.objects.select_related("ball_instance__ball").filter(battle_id=battle.pk).order_by("join_order")]
-        if len(participants) < battle.mode.min_players:
-            await interaction.response.send_message(f"Need at least {battle.mode.min_players} player(s) to begin — currently {len(participants)}.", ephemeral=True)
+        distinct_players = len({p.user_id for p in participants})
+        if distinct_players < battle.mode.min_players:
+            await interaction.response.send_message(f"Need at least {battle.mode.min_players} player(s) to begin — currently {distinct_players}.", ephemeral=True)
             return
+
+        if battle.mode.min_deck_size > 1:
+            seats_by_user: dict[int, int] = {}
+            for p in participants:
+                seats_by_user[p.user_id] = seats_by_user.get(p.user_id, 0) + 1
+            short = [uid for uid, n in seats_by_user.items() if n < battle.mode.min_deck_size]
+            if short:
+                names = ", ".join(f"<@{uid}>" for uid in short)
+                await interaction.response.send_message(
+                    f"{names} still need at least {battle.mode.min_deck_size} ball(s) added (`/battle add`) before this battle can begin.",
+                    ephemeral=True,
+                )
+                return
 
         await interaction.response.send_message("Starting the battle...", ephemeral=True)
         await self._launch_battle(battle, participants)
@@ -268,8 +302,14 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         snapshot = await modes.build_snapshot(mode)
 
         if mode.teams_enabled:
-            for i, participant in enumerate(participants):
-                participant.team = i % 2
+            # Assign per *user*, not per seat/ball — otherwise a player
+            # fielding more than one ball could end up with their own
+            # balls split across opposing teams.
+            team_by_user: dict[int, int] = {}
+            for participant in participants:
+                if participant.user_id not in team_by_user:
+                    team_by_user[participant.user_id] = len(team_by_user) % 2
+                participant.team = team_by_user[participant.user_id]
                 await participant.asave(update_fields=["team"])
 
         for participant in participants:
@@ -550,6 +590,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                     await BattleParticipant.objects.acreate(battle=new_battle, user_id=p.user_id, ball_instance=p.ball_instance, join_order=i)
                 lobby_embed = embeds.build_lobby_embed(mode, [f"<@{p.user_id}> — {ball_display_name(p.ball_instance)}" for p in fighters])
                 lobby_view = LobbyView(
+                    battle_id=new_battle.pk,
                     on_begin=lambda i: self._handle_begin(i, new_battle.pk),
                     on_cancel=lambda i: self._handle_cancel_lobby(i, new_battle.pk),
                 )
