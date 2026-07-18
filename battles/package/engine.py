@@ -28,7 +28,15 @@ ParticipantId = int
 
 @dataclass
 class ParticipantContext:
-    """Everything the engine needs about one participant for a single turn."""
+    """Everything the engine needs about one participant for a single turn.
+
+    `shield_hp`, `vulnerable_to`, and `damage_taken_multiplier` are how
+    ability-applied status effects (see `ctx.add_effect()` in
+    `ability_api.py`) actually reach combat resolution, rather than just
+    being cosmetically recorded. They're populated by the caller from
+    each participant's active `Battle.state["effects"]` entries before
+    `resolve_turn` runs.
+    """
 
     participant_id: ParticipantId
     team: int | None
@@ -41,6 +49,13 @@ class ParticipantContext:
     heal_uses: int = 0
     ability_bonus_damage_multiplier: float = 1.0
     is_alive: bool = True
+    shield_hp: int = 0
+    # attacker participant_id -> multiplier applied only when *that*
+    # attacker lands a hit (e.g. "takes 2x damage from Larry specifically").
+    vulnerable_to: dict[ParticipantId, float] = field(default_factory=dict)
+    # Applied to incoming damage regardless of attacker (e.g. a generic
+    # "protected" buff at <1.0, or a generic "vulnerable" debuff at >1.0).
+    damage_taken_multiplier: float = 1.0
 
 
 @dataclass
@@ -73,6 +88,7 @@ class TurnResult:
     new_momentum: dict[ParticipantId, int]
     new_cooldowns: dict[ParticipantId, dict[str, int]]
     new_heal_uses: dict[ParticipantId, int]
+    new_shield_hp: dict[ParticipantId, int]
     deaths: list[ParticipantId]
 
 
@@ -118,6 +134,20 @@ def _resolve_attacker_vs(
         # Attack vs Attack, Attack vs Ability, or a Counter/Dodge still on
         # cooldown all fall through to full damage.
         final = dmg.final_damage
+
+    # Status effects: a generic protection/vulnerability multiplier, an
+    # attacker-specific vulnerability multiplier (e.g. "takes 2x damage
+    # specifically from Larry"), then a shield that absorbs whatever's
+    # left before it reaches HP.
+    if final > 0:
+        final = int(round(final * defender.damage_taken_multiplier))
+        final = int(round(final * defender.vulnerable_to.get(attacker.participant_id, 1.0)))
+        if defender.shield_hp > 0:
+            absorbed = min(defender.shield_hp, final)
+            defender.shield_hp -= absorbed
+            final -= absorbed
+            if absorbed:
+                out_defender.notes.append("shielded")
 
     out_defender.damage_taken += final
     out_attacker.damage_dealt += final
@@ -172,6 +202,7 @@ def resolve_turn(
     new_momentum: dict[ParticipantId, int] = {}
     new_cooldowns: dict[ParticipantId, dict[str, int]] = {}
     new_heal_uses: dict[ParticipantId, int] = {}
+    new_shield_hp: dict[ParticipantId, int] = {}
     deaths: list[ParticipantId] = []
 
     for pid, ctx in participants.items():
@@ -191,6 +222,9 @@ def resolve_turn(
         new_cooldowns[pid] = _tick_cooldowns(ctx.cooldowns, used_action)
 
         new_heal_uses[pid] = ctx.heal_uses + (1 if outcome and outcome.healed > 0 else 0)
+        # `ctx.shield_hp` was mutated in place by `_resolve_attacker_vs` as
+        # damage was absorbed against it this turn.
+        new_shield_hp[pid] = ctx.shield_hp
 
     return TurnResult(
         outcomes=outcomes,
@@ -198,6 +232,7 @@ def resolve_turn(
         new_momentum=new_momentum,
         new_cooldowns=new_cooldowns,
         new_heal_uses=new_heal_uses,
+        new_shield_hp=new_shield_hp,
         deaths=deaths,
     )
 
