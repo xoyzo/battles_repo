@@ -452,12 +452,13 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         engine_participants: dict[int, ParticipantContext] = {}
         for pid in view.participant_ids:
             p = participants_by_id[pid]
-            shield_hp, vulnerable_to, damage_taken_multiplier = self._read_status_effects(battle, pid)
+            shield_hp, vulnerable_to, damage_taken_multiplier, flat_damage_bonus = self._read_status_effects(battle, pid)
             engine_participants[pid] = ParticipantContext(
                 participant_id=pid, team=p.team, hp=p.hp, max_hp=p.max_hp,
                 attack=p.attack, defense=p.defense, momentum=p.momentum,
                 cooldowns=dict(p.cooldowns or {}), heal_uses=p.heal_uses, is_alive=p.is_alive,
                 shield_hp=shield_hp, vulnerable_to=vulnerable_to, damage_taken_multiplier=damage_taken_multiplier,
+                flat_damage_bonus=flat_damage_bonus,
             )
 
         result: TurnResult = resolve_turn(engine_participants, actions, snapshot)
@@ -724,11 +725,12 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         for user_id, amount in currency_grants:
             await award_currency(self.bot, user_id, amount, reason=f"ability-{hook_name}")
 
-    def _read_status_effects(self, battle: Battle, participant_id: int) -> tuple[int, dict[int, float], float]:
+    def _read_status_effects(self, battle: Battle, participant_id: int) -> tuple[int, dict[int, float], float, int]:
         """Collapse a participant's active `Battle.state["effects"]` entries
         into what `engine.ParticipantContext` actually understands: total
-        shield HP, a per-attacker vulnerability multiplier map, and a
-        generic (attacker-agnostic) incoming-damage multiplier.
+        shield HP, a per-attacker vulnerability multiplier map, a generic
+        (attacker-agnostic) incoming-damage multiplier, and a flat bonus to
+        this participant's own outgoing Attack damage.
 
         Effect dict shape, as authored by ability scripts via
         `ctx.add_effect({...})`:
@@ -739,11 +741,16 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             any attacker; setting it restricts the multiplier to hits from
             that one specific participant.
           - {"kind": "protected", "amount": <multiplier, e.g. 0.0-1.0>, "duration": <turns>}
+          - {"kind": "attack_buff", "amount": <flat bonus, e.g. 200>, "duration": <turns>}
+            A temporary flat addition to this participant's own Attack
+            damage (e.g. a "rage mode") — still subject to the target's
+            Defend/Counter/Dodge, unlike a permanent `modify_stat` change.
         """
         effects = ((battle.state or {}).get("effects", {})).get(str(participant_id), [])
         shield_hp = 0
         vulnerable_to: dict[int, float] = {}
         damage_taken_multiplier = 1.0
+        flat_damage_bonus = 0
 
         for effect in effects:
             if effect.get("duration", 0) <= 0:
@@ -760,8 +767,10 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                     damage_taken_multiplier *= multiplier
             elif kind == "protected":
                 damage_taken_multiplier *= float(effect.get("amount", 1.0))
+            elif kind == "attack_buff":
+                flat_damage_bonus += int(effect.get("amount", 0))
 
-        return shield_hp, vulnerable_to, damage_taken_multiplier
+        return shield_hp, vulnerable_to, damage_taken_multiplier, flat_damage_bonus
 
     def _tick_status_effects(self, battle: Battle, result: TurnResult) -> None:
         """Decrement every active effect's remaining duration by one turn,
