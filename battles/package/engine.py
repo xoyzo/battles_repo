@@ -56,6 +56,11 @@ class ParticipantContext:
     # Applied to incoming damage regardless of attacker (e.g. a generic
     # "protected" buff at <1.0, or a generic "vulnerable" debuff at >1.0).
     damage_taken_multiplier: float = 1.0
+    # A flat bonus added to this participant's own outgoing Attack damage
+    # for as long as an "attack_buff" status effect is active (e.g. a
+    # temporary "rage mode" — unlike `modify_stat`'s permanent percentage
+    # change, this is duration-tracked and expires on its own).
+    flat_damage_bonus: int = 0
 
 
 @dataclass
@@ -110,6 +115,11 @@ def _resolve_attacker_vs(
         extra_multiplier=attacker.ability_bonus_damage_multiplier,
         rng=rng,
     )
+    if attacker.flat_damage_bonus:
+        # A temporary flat bonus (e.g. "rage mode") is added to the raw
+        # hit before mitigation, so Defend/Counter/Dodge still interact
+        # with it normally rather than bypassing them.
+        dmg.final_damage += attacker.flat_damage_bonus
     out_attacker.is_critical = dmg.is_critical
 
     if defender_action is ActionKey.DEFEND:
