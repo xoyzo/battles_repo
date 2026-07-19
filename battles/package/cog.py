@@ -839,14 +839,21 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                 lo, hi = snapshot.get("momentum_min", -5), snapshot.get("momentum_max", 5)
                 target.momentum = max(lo, min(hi, target.momentum + int(queued.payload.get("amount", 0))))
             elif queued.kind == "modify_stat":
-                # See README: multi-turn stat buffs are an extension point.
-                # Applied for the remainder of this action only today.
+                # See README: multi-turn percentage buffs are an extension
+                # point (attack_pct/defense_pct apply permanently, with no
+                # duration tracking). max_hp_flat below is a genuine
+                # permanent change by design — it grows the participant's
+                # actual HP pool, current HP included, not just a cap.
                 stat = str(queued.payload.get("stat", ""))
                 amount = float(queued.payload.get("amount", 0))
                 if stat == "attack_pct":
                     target.attack = max(1, int(round(target.attack * (1 + amount))))
                 elif stat == "defense_pct":
                     target.defense = max(1, int(round(target.defense * (1 + amount))))
+                elif stat == "max_hp_flat":
+                    increase = int(amount)
+                    target.max_hp = max(1, target.max_hp + increase)
+                    target.hp = max(0, target.hp + increase)
             elif queued.kind == "status":
                 effects_state.setdefault(str(target.pk), []).append(queued.payload.get("effect", {}))
             elif queued.kind == "silence":
