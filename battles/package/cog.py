@@ -850,6 +850,14 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                 cooldowns = dict(target.cooldowns or {})
                 cooldowns["ability"] = max(cooldowns.get("ability", 0), duration)
                 target.cooldowns = cooldowns
+            elif queued.kind == "cripple":
+                # Same trick as "silence", but blocks Attack instead of
+                # Ability (see the "attack" cooldown_field added to
+                # ActionKey.ATTACK's definition in actions.py).
+                duration = max(1, int(queued.payload.get("duration", 1)))
+                cooldowns = dict(target.cooldowns or {})
+                cooldowns["attack"] = max(cooldowns.get("attack", 0), duration)
+                target.cooldowns = cooldowns
             elif queued.kind == "currency":
                 currency_grants.append((target.user_id, int(queued.payload.get("amount", 0))))
 
