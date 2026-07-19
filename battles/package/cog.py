@@ -435,7 +435,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             if participant is None or ability is None:
                 continue
             try:
-                ctx = self._build_ability_context(battle, all_participants, pid, "execute")
+                ctx = self._build_ability_context(battle, all_participants, pid, "execute", actions=actions)
                 if ctx is None:
                     log.warning("Could not build ability context for participant %s (ability %s); skipping activation.", pid, ability.pk)
                     continue
@@ -637,7 +637,10 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
     # ------------------------------------------------------------------
     # Ability hook plumbing
     # ------------------------------------------------------------------
-    def _build_ability_context(self, battle: Battle, participants: list[BattleParticipant], participant_id: int, hook_name: str) -> AbilityContext | None:
+    def _build_ability_context(
+        self, battle: Battle, participants: list[BattleParticipant], participant_id: int, hook_name: str,
+        *, actions: dict[int, TurnAction] | None = None,
+    ) -> AbilityContext | None:
         me = next((p for p in participants if p.pk == participant_id), None)
         if me is None:
             log.warning("Ability hook %r requested for participant %s, but they aren't in the roster passed in.", hook_name, participant_id)
@@ -650,7 +653,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         def _state(p: BattleParticipant | None) -> dict:
             if p is None:
                 return {"hp": 0, "momentum": 0}
-            return {
+            state = {
                 "hp": p.hp,
                 "max_hp": p.max_hp,
                 "momentum": p.momentum,
@@ -660,6 +663,16 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                 "defense": p.defense,
                 "team": p.team,
             }
+            # Only populated when called from the active-ability execution
+            # path (where every player's choice for this turn is already
+            # locked in) — lets a "reactive" ability check what an
+            # opponent is actually doing/targeting this turn, e.g. a parry
+            # that only triggers against an attack aimed at *them*.
+            if actions is not None and p.pk in actions:
+                act = actions[p.pk]
+                state["action"] = act.action.value
+                state["target_id"] = act.target_id
+            return state
 
         return AbilityContext(
             battle_id=battle.pk, turn_number=battle.current_turn, self_side=str(participant_id),
