@@ -40,6 +40,12 @@ ACTIONS: dict[ActionKey, ActionDefinition] = {
         label="Attack",
         emoji="⚔️",
         description="Deal damage. Beats Heal, blocked by Defend, loses to Counter, missed by Dodge.",
+        # Attack itself never sets this cooldown through normal use (it's
+        # not in `engine.apply_cooldown_on_use`'s length map) — it only
+        # exists so an ability effect like a "cripple" debuff has a slot
+        # to block the Attack button through, the same way "silence"
+        # blocks Ability via its own cooldown field.
+        cooldown_field="attack",
     ),
     ActionKey.DEFEND: ActionDefinition(
         key=ActionKey.DEFEND,
