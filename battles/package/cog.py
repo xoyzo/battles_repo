@@ -840,6 +840,16 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                     target.defense = max(1, int(round(target.defense * (1 + amount))))
             elif queued.kind == "status":
                 effects_state.setdefault(str(target.pk), []).append(queued.payload.get("effect", {}))
+            elif queued.kind == "silence":
+                # Blocks the Ability action specifically, by directly
+                # setting the target's own "ability" cooldown — the same
+                # field/check the turn-selection UI already uses for
+                # Counter/Dodge/Ability cooldowns, so no new UI plumbing
+                # is needed for a "can't use their ability" trap.
+                duration = max(1, int(queued.payload.get("duration", 1)))
+                cooldowns = dict(target.cooldowns or {})
+                cooldowns["ability"] = max(cooldowns.get("ability", 0), duration)
+                target.cooldowns = cooldowns
             elif queued.kind == "currency":
                 currency_grants.append((target.user_id, int(queued.payload.get("amount", 0))))
 
