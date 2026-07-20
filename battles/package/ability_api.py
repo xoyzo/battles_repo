@@ -10,6 +10,7 @@ about/replay.
 """
 from __future__ import annotations
 
+import random as _random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -107,3 +108,14 @@ class AbilityContext:
 
     def get_enemies(self) -> list[dict[str, Any]]:
         return list(self.enemies)
+
+    def pick_random(self, items: list[Any]) -> Any | None:
+        """Pick a uniformly random element from a list the script provides
+        (e.g. `ctx.pick_random(ctx.get_enemies())`). Ability scripts can't
+        `import random` themselves — the sandbox blocks every import — so
+        this is the sanctioned way for an ability to make a random choice.
+        Returns None if `items` is empty.
+        """
+        if not items:
+            return None
+        return _random.choice(items)
