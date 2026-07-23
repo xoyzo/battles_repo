@@ -90,7 +90,8 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
 
         battle = await Battle.objects.acreate(
             mode=mode, guild_id=interaction.guild_id or 0, channel_id=interaction.channel_id or 0,
-            status=Battle.Status.LOBBY, state={"invited_user_ids": [opponent.id] if opponent else []},
+            status=Battle.Status.LOBBY,
+            state={"invited_user_ids": [interaction.user.id, opponent.id] if opponent else []},
             created_at=helpers.now_utc(), last_action_at=helpers.now_utc(),
         )
 
@@ -244,8 +245,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
 
         names = []
         for user_id, ball_names in balls_by_user.items():
-            member = message.guild.get_member(user_id) if message.guild else None
-            display = member.display_name if member else f"<@{user_id}>"
+            display = self._display_name(battle.guild_id, user_id)
             names.append(f"{display} — {', '.join(ball_names)}")
         embed = embeds.build_lobby_embed(mode, names)
         await message.edit(embed=embed)
@@ -338,7 +338,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         await self._run_passive_hooks(battle, participants, "battle_start")
         await battle.asave()
 
-        user_display = {p.pk: f"<@{p.user_id}>" for p in participants}
+        user_display = {p.pk: self._display_name(battle.guild_id, p.user_id) for p in participants}
         ball_by_participant = {p.pk: p.ball_instance for p in participants}
         embed = embeds.build_battle_embed(self.bot, battle, participants, ball_by_participant, user_display, {p.pk: False for p in participants})
         mentions = " ".join(f"<@{p.user_id}>" for p in participants)
@@ -510,7 +510,11 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         battle_finished = turn_limit_hit or len(living_teams) <= 1
 
         summary_lines = [
-            helpers.format_action_summary(f"<@{participants_by_id[pid].user_id}>", ACTIONS[act.action].label, ACTIONS[act.action].emoji, result.outcomes[pid].notes if pid in result.outcomes else [])
+            helpers.format_action_summary(
+                self._display_name(battle.guild_id, participants_by_id[pid].user_id),
+                ACTIONS[act.action].label, ACTIONS[act.action].emoji,
+                result.outcomes[pid].notes if pid in result.outcomes else [],
+            )
             for pid, act in actions.items()
         ]
         summary = "\n".join(summary_lines)
@@ -528,7 +532,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             await self._finish_battle(battle, all_participants, message, summary)
         else:
             await battle.asave()
-            user_display = {p.pk: f"<@{p.user_id}>" for p in all_participants}
+            user_display = {p.pk: self._display_name(battle.guild_id, p.user_id) for p in all_participants}
             ball_by_participant = {p.pk: p.ball_instance for p in all_participants}
             embed = embeds.build_battle_embed(self.bot, battle, all_participants, ball_by_participant, user_display, {p.pk: False for p in all_participants}, last_turn_summary=summary)
             await message.edit(embed=embed)
@@ -558,13 +562,13 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                 total = int(round(reward_profile.win_reward * win_mult)) + streak_bonus
                 awarded = await award_currency(self.bot, winner.user_id, total, reason="battle-win")
                 if awarded:
-                    reward_lines.append(f"<@{winner.user_id}>: +{total}")
+                    reward_lines.append(f"{self._display_name(battle.guild_id, winner.user_id)}: +{total}")
                 await self._run_passive_hooks(battle, participants, "on_win", only_pids={winner.pk})
             for loser in losers:
                 total = int(round(reward_profile.loss_reward * loss_mult))
                 awarded = await award_currency(self.bot, loser.user_id, total, reason="battle-loss")
                 if awarded:
-                    reward_lines.append(f"<@{loser.user_id}>: +{total}")
+                    reward_lines.append(f"{self._display_name(battle.guild_id, loser.user_id)}: +{total}")
                 await self._run_passive_hooks(battle, participants, "on_loss", only_pids={loser.pk})
         else:
             total = int(round(reward_profile.draw_reward * draw_mult))
@@ -572,13 +576,13 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                 if participant.is_spectator:
                     continue
                 if await award_currency(self.bot, participant.user_id, total, reason="battle-draw"):
-                    reward_lines.append(f"<@{participant.user_id}>: +{total}")
+                    reward_lines.append(f"{self._display_name(battle.guild_id, participant.user_id)}: +{total}")
 
         winner_text = None
         if winners:
-            winner_text = " & ".join(f"<@{w.user_id}>" for w in winners)
+            winner_text = " & ".join(self._display_name(battle.guild_id, w.user_id) for w in winners)
 
-        user_display = {p.pk: f"<@{p.user_id}>" for p in participants}
+        user_display = {p.pk: self._display_name(battle.guild_id, p.user_id) for p in participants}
         ball_by_participant = {p.pk: p.ball_instance for p in participants}
         embed = embeds.build_result_embed(battle, participants, ball_by_participant, user_display, winner_text=winner_text, reward_text="\n".join(reward_lines) or None)
 
@@ -599,7 +603,7 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
                 )
                 for i, p in enumerate(fighters):
                     await BattleParticipant.objects.acreate(battle=new_battle, user_id=p.user_id, ball_instance=p.ball_instance, join_order=i)
-                lobby_embed = embeds.build_lobby_embed(mode, [f"<@{p.user_id}> — {ball_display_name(p.ball_instance)}" for p in fighters])
+                lobby_embed = embeds.build_lobby_embed(mode, [f"{self._display_name(new_battle.guild_id, p.user_id)} — {ball_display_name(p.ball_instance)}" for p in fighters])
                 lobby_view = LobbyView(
                     battle_id=new_battle.pk,
                     on_begin=lambda i: self._handle_begin(i, new_battle.pk),
@@ -879,6 +883,25 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
 
         state["effects"] = effects_state
         battle.state = state
+
+    def _display_name(self, guild_id: int, user_id: int) -> str:
+        """Best-effort real display name for embeds. Never falls back to
+        `<@id>` mention syntax — Discord doesn't reliably render or ping
+        mentions placed inside embed titles/fields/descriptions, so every
+        embed-bound name in this package goes through here instead. Real
+        `<@id>` mentions are still used, deliberately, in plain message
+        `content=` (not embeds) for the handful of moments that should
+        actually notify someone: a lobby invite, and a battle starting.
+        """
+        guild = self.bot.get_guild(guild_id)
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member.display_name
+        user = self.bot.get_user(user_id)
+        if user is not None:
+            return getattr(user, "display_name", None) or user.name
+        return f"Player {user_id}"
 
     async def notify_battle_expired(self, battle: Battle) -> None:
         try:
