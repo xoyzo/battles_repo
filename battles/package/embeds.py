@@ -93,7 +93,7 @@ def build_battle_embed(
 
     active = [p for p in participants if not p.is_spectator]
 
-    if len(active) == 2 and not any(p.team is not None for p in active):
+    if len(active) == 2 and active[0].team != active[1].team:
         # Classic Duel layout.
         p1, p2 = active
         label1, value1 = _participant_field(
