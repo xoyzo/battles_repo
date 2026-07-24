@@ -301,16 +301,26 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         mode = await BattleMode.objects.aget(pk=battle.mode_id)
         snapshot = await modes.build_snapshot(mode)
 
-        if mode.teams_enabled:
-            # Assign per *user*, not per seat/ball — otherwise a player
-            # fielding more than one ball could end up with their own
-            # balls split across opposing teams.
-            team_by_user: dict[int, int] = {}
-            for participant in participants:
-                if participant.user_id not in team_by_user:
-                    team_by_user[participant.user_id] = len(team_by_user) % 2
-                participant.team = team_by_user[participant.user_id]
-                await participant.asave(update_fields=["team"])
+        # Every participant always gets a real team number, never None,
+        # whether or not the mode has multi-player teams — a user's own
+        # multiple balls (a multi-ball deck) must always be allies of each
+        # other, or the engine treats them as mutually hostile. When
+        # `teams_enabled` is on, multiple *users* are then grouped
+        # together, `team_size` users per side; otherwise each user simply
+        # gets their own unique team, which still correctly groups a
+        # single user's whole deck as one side.
+        ordered_user_ids: list[int] = []
+        for p in participants:
+            if p.user_id not in ordered_user_ids:
+                ordered_user_ids.append(p.user_id)
+
+        team_by_user: dict[int, int] = {}
+        for i, user_id in enumerate(ordered_user_ids):
+            team_by_user[user_id] = (i // mode.team_size) if mode.teams_enabled else i
+
+        for participant in participants:
+            participant.team = team_by_user[participant.user_id]
+            await participant.asave(update_fields=["team"])
 
         for participant in participants:
             stats = get_battle_stats(participant.ball_instance)
@@ -523,11 +533,13 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
             battle.status = Battle.Status.FINISHED
             battle.finished_at = helpers.now_utc()
             if len(living_teams) == 1:
-                winner_marker = next(iter(living_teams))
-                if snapshot.get("teams_enabled"):
-                    battle.winner_team = winner_marker
-                else:
-                    battle.winner_participant_id = winner_marker
+                # Every participant always has a real team number now (see
+                # `_launch_battle` — a user's own multi-ball deck is always
+                # grouped as one team, whether or not the mode has
+                # multi-player teams), so winner determination is always
+                # team-based; `winner_participant` is left unused going
+                # forward rather than fed a team index by mistake.
+                battle.winner_team = next(iter(living_teams))
             await battle.asave()
             await self._finish_battle(battle, all_participants, message, summary)
         else:
@@ -549,9 +561,12 @@ class BattlesCog(commands.GroupCog, group_name="battle", group_description="Chal
         winners: list[BattleParticipant] = []
         losers: list[BattleParticipant] = []
         if battle.winner_team is not None:
+            # The only path new battles take — every participant always
+            # has a real team number now, regardless of mode.
             winners = [p for p in participants if p.team == battle.winner_team and not p.is_spectator]
             losers = [p for p in participants if p.team != battle.winner_team and not p.is_spectator]
         elif battle.winner_participant_id is not None:
+            # Legacy fallback only — no new battle sets this field anymore.
             winners = [p for p in participants if p.pk == battle.winner_participant_id]
             losers = [p for p in participants if p.pk != battle.winner_participant_id and not p.is_spectator]
 
