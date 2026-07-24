@@ -44,6 +44,15 @@ BUILTIN_MODES: list[dict] = [
         "teams_enabled": True, "team_size": 2,
         "min_deck_size": 1, "max_deck_size": 1,
     },
+    {
+        "name": "Triples",
+        "description": "One-on-one, but each player fields a squad of 3 balls fighting as a team.",
+        "icon": "🔱",
+        "mode_type": BattleMode.ModeType.DUEL,
+        "min_players": 2, "max_players": 2,
+        "teams_enabled": False, "team_size": 1,
+        "min_deck_size": 3, "max_deck_size": 3,
+    },
 ]
 
 
